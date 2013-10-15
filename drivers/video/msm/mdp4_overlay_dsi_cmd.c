@@ -31,9 +31,6 @@
 #include "mipi_dsi.h"
 #include "mdp4.h"
 
-#define TOUT_PERIOD	HZ	/* 1 second */
-#define MS_100		(HZ/10)	/* 100 ms */
-
 static int vsync_start_y_adjust = 4;
 
 #define MAX_CONTROLLER	1
@@ -43,6 +40,9 @@ static int vsync_start_y_adjust = 4;
  * VSYNC_EXPIRE_TICK == 4 is recommended
  */
 #define VSYNC_EXPIRE_TICK 4
+
+#define VSYNC_MIN_DIFF_MS 4
+
 static bool dsi_panel_on;
 
 static struct vsycn_ctrl {
@@ -66,7 +66,6 @@ static struct vsycn_ctrl {
 	struct mutex update_lock;
 	struct completion ov_comp;
 	struct completion dmap_comp;
-	struct completion vsync_comp;
 	struct completion show_event_comp;
 	spinlock_t spin_lock;
 	struct msm_fb_data_type *mfd;
@@ -78,6 +77,7 @@ static struct vsycn_ctrl {
 	int clk_control;
 	ktime_t vsync_time;
 	struct work_struct clk_work;
+	wait_queue_head_t wait_queue;
 } vsync_ctrl_db[MAX_CONTROLLER];
 
 static void vsync_irq_enable(int intr, int term)
@@ -475,9 +475,6 @@ void mdp4_dsi_cmd_wait4vsync(int cndx)
 {
 	struct vsycn_ctrl *vctrl;
 	struct mdp4_overlay_pipe *pipe;
-	unsigned long flags;
-	static int timeout_occurred[MAX_CONTROLLER];
-	uint32 prev_rdptr_intr;
 
 	if (cndx >= MAX_CONTROLLER) {
 		pr_err("%s: out or range: cndx=%d\n", __func__, cndx);
@@ -490,23 +487,9 @@ void mdp4_dsi_cmd_wait4vsync(int cndx)
 	if (atomic_read(&vctrl->suspend) > 0)
 		return;
 
-	spin_lock_irqsave(&vctrl->spin_lock, flags);
-	INIT_COMPLETION(vctrl->vsync_comp);
-	spin_unlock_irqrestore(&vctrl->spin_lock, flags);
+	wait_event_interruptible_timeout(vctrl->wait_queue, 1,
+			msecs_to_jiffies(VSYNC_PERIOD * 8));
 
-	prev_rdptr_intr = vctrl->rdptr_intr_tot;
-	if (!wait_for_completion_timeout(&vctrl->vsync_comp,
-			msecs_to_jiffies(VSYNC_PERIOD * 4))) {
-		pr_err("%s: TIMEOUT (rdptr_intr: prev: %u cur: %u)\n", __func__,
-			prev_rdptr_intr, vctrl->rdptr_intr_tot);
-		timeout_occurred[cndx] = 1;
-		mdp4_hang_dump(__func__);
-	} else {
-		if (timeout_occurred[cndx])
-			pr_info("%s: recovered from previous timeout\n",
-				__func__);
-		timeout_occurred[cndx] = 0;
-	}
 	mdp4_stat.wait4vsync0++;
 }
 
@@ -613,7 +596,6 @@ static void mdp4_dsi_cmd_wait4ov(int cndx)
 static void primary_rdptr_isr(int cndx)
 {
 	struct vsycn_ctrl *vctrl;
-
 	vctrl = &vsync_ctrl_db[cndx];
 	pr_debug("%s: ISR, tick=%d pan=%d cpu=%d\n", __func__,
 		vctrl->expire_tick, vctrl->pan_display, smp_processor_id());
@@ -628,8 +610,8 @@ static void primary_rdptr_isr(int cndx)
 		return;
 	}
 
-	complete(&vctrl->vsync_comp);
 	complete(&vctrl->show_event_comp);
+	wake_up_interruptible_all(&vctrl->wait_queue);
 
 	if (vctrl->expire_tick) {
 		vctrl->expire_tick--;
@@ -651,7 +633,6 @@ void mdp4_dmap_done_dsi_cmd(int cndx)
 	struct vsycn_ctrl *vctrl;
 	struct mdp4_overlay_pipe *pipe;
 	int diff;
-
 	vctrl = &vsync_ctrl_db[cndx];
 	pipe = vctrl->base_pipe;
 
@@ -782,12 +763,15 @@ ssize_t mdp4_dsi_cmd_show_event(struct device *dev,
 	static int timeout_occurred;
 	uint32 prev_rdptr_intr;
 	int retries = 2;
+	ktime_t timestamp;
 
 	cndx = 0;
 	vctrl = &vsync_ctrl_db[0];
+	timestamp = vctrl->vsync_time;
 
-	if (atomic_read(&vctrl->suspend) > 0)
-		return 0;
+	ret = wait_event_interruptible(vctrl->wait_queue,
+			!ktime_equal(timestamp, vctrl->vsync_time) &&
+			vctrl->vsync_enabled);
 
 	spin_lock_irqsave(&vctrl->spin_lock, flags);
 	INIT_COMPLETION(vctrl->show_event_comp);
@@ -825,11 +809,9 @@ ssize_t mdp4_dsi_cmd_show_event(struct device *dev,
 		mdp4_hang_dump(__func__);
 	}
 
-	spin_lock_irqsave(&vctrl->spin_lock, flags);
-	vsync_tick = ktime_to_ns(vctrl->vsync_time);
-	spin_unlock_irqrestore(&vctrl->spin_lock, flags);
 
-	ret = snprintf(buf, PAGE_SIZE, "VSYNC=%llu", vsync_tick);
+	vsync_tick = ktime_to_ns(vctrl->vsync_time);
+	ret = scnprintf(buf, PAGE_SIZE, "VSYNC=%llu", vsync_tick);
 	buf[strlen(buf) + 1] = '\0';
 	return ret;
 }
@@ -852,9 +834,9 @@ void mdp4_dsi_rdptr_init(int cndx)
 	mutex_init(&vctrl->update_lock);
 	init_completion(&vctrl->ov_comp);
 	init_completion(&vctrl->dmap_comp);
-	init_completion(&vctrl->vsync_comp);
 	init_completion(&vctrl->show_event_comp);
 	spin_lock_init(&vctrl->spin_lock);
+	init_waitqueue_head(&vctrl->wait_queue);
 	atomic_set(&vctrl->suspend, 1);
 	INIT_WORK(&vctrl->clk_work, clk_ctrl_work);
 }
@@ -882,37 +864,57 @@ static __u32 msm_fb_line_length(__u32 fb_index, __u32 xres, int bpp)
 void mdp4_mipi_vsync_enable(struct msm_fb_data_type *mfd,
 		struct mdp4_overlay_pipe *pipe, int which)
 {
-	uint32 start_y, data, tear_en;
+	uint32 data, tear_en;
 
 	tear_en = (1 << which);
 
 	mdp_clk_ctrl(1);
+
+	data = inpdw(MDP_BASE + 0x20c);
 	if ((mfd->use_mdp_vsync) && (mfd->ibuf.vsync_enable) &&
-		(mfd->panel_info.lcd.vsync_enable)) {
-		u32 temp;
-
-		if (vsync_start_y_adjust <= pipe->dst_y)
-			start_y = pipe->dst_y - vsync_start_y_adjust;
-		else
-			start_y = (mfd->total_lcd_lines - 1) -
-				(vsync_start_y_adjust - pipe->dst_y);
-		if (which == 0)
-			MDP_OUTP(MDP_BASE + 0x210, start_y);	/* primary */
-		else
-			MDP_OUTP(MDP_BASE + 0x214, start_y);	/* secondary */
-
-		temp = inpdw(MDP_BASE + 0x100);
-		temp |= (0x7ff << MDP_SYNCFG_HGT_LOC);
-		MDP_OUTP(MDP_BASE + 0x100, temp);
-
-		data = inpdw(MDP_BASE + 0x20c);
+	    (mfd->panel_info.lcd.vsync_enable)) {
 		data |= tear_en;
-		MDP_OUTP(MDP_BASE + 0x20c, data);
-	} else {
-		data = inpdw(MDP_BASE + 0x20c);
+		/*
+		 * rdptr init and irq cannot be same due to h/w bug.
+		 * if they are same, rdptr irqs could be missed.
+		 */
+		if (mfd->panel_info.lcd.primary_vsync_init ||
+			mfd->panel_info.lcd.primary_rdptr_irq) {
+			MDP_OUTP(MDP_BASE + 0x128,
+				mfd->panel_info.lcd.primary_vsync_init);
+			MDP_OUTP(MDP_BASE + 0x21C,
+				mfd->panel_info.lcd.primary_rdptr_irq);
+		} else {
+			MDP_OUTP(MDP_BASE + 0x128, 0);
+			MDP_OUTP(MDP_BASE + 0x21C, 1);
+		}
+
+		/*
+		 * adjust start position and threshold to make sure
+		 * write ptr follows read pts (TE is effective), and
+		 * at the same write is not throttled(shorter dmap
+		 * time)
+		 */
+		if (mfd->panel_info.lcd.primary_start_pos)
+			MDP_OUTP(MDP_BASE + 0x210,
+				mfd->panel_info.lcd.primary_start_pos);
+		else
+			MDP_OUTP(MDP_BASE + 0x210,
+				 mfd->panel_info.lcd.v_back_porch +
+				 mfd->panel_info.lcd.v_front_porch +
+				 vsync_start_y_adjust);
+
+		if (mfd->panel_info.lcd.vsync_threshold_continue &&
+				mfd->panel_info.lcd.vsync_threshold_start)
+			MDP_OUTP(MDP_BASE + 0x200,
+			 ((mfd->panel_info.lcd.vsync_threshold_continue << 16) |
+				mfd->panel_info.lcd.vsync_threshold_start));
+		else
+			MDP_OUTP(MDP_BASE + 0x200,
+			 ((4 << 16) | mfd->panel_info.lcd.v_pulse_width));
+	} else
 		data &= ~tear_en;
-		MDP_OUTP(MDP_BASE + 0x20c, data);
-	}
+	MDP_OUTP(MDP_BASE + 0x20c, data);
 	mdp_clk_ctrl(0);
 }
 
@@ -1032,7 +1034,8 @@ static void mdp4_overlay_update_dsi_cmd(struct msm_fb_data_type *mfd)
 	/* TE enabled */
 	mdp4_mipi_vsync_enable(mfd, pipe, 0);
 
-	MDP_OUTP(MDP_BASE + 0x021c, mfd->fbi->var.yres + 1); /* read pointer */
+	mdp4_overlay_mdp_pipe_req(pipe, mfd);
+	mdp4_calc_blt_mdp_bw(mfd, pipe);
 
 	/*
 	 * configure dsi stream id
@@ -1041,6 +1044,8 @@ static void mdp4_overlay_update_dsi_cmd(struct msm_fb_data_type *mfd)
 	MDP_OUTP(MDP_BASE + 0x000a0, 0x10);
 	/* disable dsi trigger */
 	MDP_OUTP(MDP_BASE + 0x000a4, 0x00);
+
+	mdp4_overlay_solidfill_init(pipe);
 
 	mdp4_overlay_setup_pipe_addr(mfd, pipe);
 
@@ -1199,6 +1204,7 @@ int mdp4_dsi_cmd_off(struct platform_device *pdev)
 	int undx;
 	int need_wait, cnt;
 	unsigned long flags;
+	int mixer = 0;
 
 	pr_debug("%s+: pid=%d\n", __func__, current->pid);
 
@@ -1219,9 +1225,8 @@ int mdp4_dsi_cmd_off(struct platform_device *pdev)
 
 	need_wait = 0;
 	mutex_lock(&vctrl->update_lock);
-
-	complete(&vctrl->vsync_comp);
 	complete(&vctrl->show_event_comp);
+	wake_up_interruptible_all(&vctrl->wait_queue);
 
 	pr_debug("%s: clk=%d pan=%d\n", __func__,
 			vctrl->clk_enabled, vctrl->pan_display);
@@ -1268,7 +1273,8 @@ int mdp4_dsi_cmd_off(struct platform_device *pdev)
 
 	if (pipe) {
 		/* sanity check, free pipes besides base layer */
-		mdp4_overlay_unset_mixer(pipe->mixer_num);
+		mixer = pipe->mixer_num;
+		mdp4_overlay_unset_mixer(mixer);
 		if (mfd->ref_cnt == 0) {
 			/* adb stop */
 			if (pipe->pipe_type == OVERLAY_TYPE_BF)
@@ -1287,6 +1293,14 @@ int mdp4_dsi_cmd_off(struct platform_device *pdev)
 	}
 
 	atomic_set(&vctrl->suspend, 1);
+
+	/*
+	 * clean up ion freelist
+	 * there need two stage to empty ion free list
+	 * therefore need call unmap freelist twice
+	 */
+	mdp4_overlay_iommu_unmap_freelist(mixer);
+	mdp4_overlay_iommu_unmap_freelist(mixer);
 
 	mutex_unlock(&mfd->dma->ov_mutex);
 
