@@ -77,9 +77,8 @@ static int gc_thread_func(void *data)
 		if (f2fs_gc(sbi))
 			wait_ms = GC_THREAD_NOGC_SLEEP_TIME;
 
-		/* balancing prefree segments */
-		if (excess_prefree_segs(sbi))
-			f2fs_sync_fs(sbi->sb, true);
+		/* balancing f2fs's metadata periodically */
+		f2fs_balance_fs_bg(sbi);
 
 	} while (!kthread_should_stop());
 	return 0;
