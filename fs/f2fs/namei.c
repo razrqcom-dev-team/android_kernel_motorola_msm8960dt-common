@@ -41,19 +41,14 @@ static struct inode *f2fs_new_inode(struct inode *dir, umode_t mode)
 	}
 	mutex_unlock_op(sbi, ilock);
 
-	if (IS_ANDROID_EMU(sbi, F2FS_I(dir), F2FS_I(dir)))
-		f2fs_android_emu(sbi, inode, &inode->i_uid,
-				 &inode->i_gid, &mode);
-	else {
-		inode->i_uid = current_fsuid();
+	inode->i_uid = current_fsuid();
 
-		if (dir->i_mode & S_ISGID) {
-			inode->i_gid = dir->i_gid;
-			if (S_ISDIR(mode))
-				mode |= S_ISGID;
-		} else {
-			inode->i_gid = current_fsgid();
-		}
+	if (dir->i_mode & S_ISGID) {
+		inode->i_gid = dir->i_gid;
+		if (S_ISDIR(mode))
+			mode |= S_ISGID;
+	} else {
+		inode->i_gid = current_fsgid();
 	}
 
 	inode->i_ino = ino;

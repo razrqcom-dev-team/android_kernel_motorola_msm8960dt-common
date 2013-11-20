@@ -189,7 +189,6 @@ static void update_sit_entry(struct f2fs_sb_info *sbi, block_t blkaddr, int del)
 	struct seg_entry *se;
 	unsigned int segno, offset;
 	long int new_vblocks;
-	bool check_map = false;
 
 	segno = GET_SEGNO(sbi, blkaddr);
 
@@ -200,43 +199,18 @@ static void update_sit_entry(struct f2fs_sb_info *sbi, block_t blkaddr, int del)
 	BUG_ON((new_vblocks >> (sizeof(unsigned short) << 3) ||
 				(new_vblocks > sbi->blocks_per_seg)));
 
+	se->valid_blocks = new_vblocks;
 	se->mtime = get_mtime(sbi);
 	SIT_I(sbi)->max_mtime = se->mtime;
 
 	/* Update valid block bitmap */
 	if (del > 0) {
-		if (f2fs_set_bit(offset, se->cur_valid_map)) {
-			f2fs_msg(sbi->sb, KERN_ERR, "attempted to validate "
-				"already-valid block %u", offset);
-			if (f2fs_handle_error(sbi))
-				check_map = true;
-		}
+		if (f2fs_set_bit(offset, se->cur_valid_map))
+			BUG();
 	} else {
-		if (!f2fs_clear_bit(offset, se->cur_valid_map)) {
-			f2fs_msg(sbi->sb, KERN_ERR, "attempted to invalidate "
-				"already-invalid block %u", offset);
-			if (f2fs_handle_error(sbi))
-				check_map = true;
-		}
+		if (!f2fs_clear_bit(offset, se->cur_valid_map))
+			BUG();
 	}
-	if (unlikely(check_map)) {
-		int i;
-		long int vblocks = 0;
-
-		/* assume the count was stale to start */
-		del = 0;
-		for (i = 0; i < sbi->blocks_per_seg; i++)
-			if (f2fs_test_bit(i, se->cur_valid_map))
-				vblocks++;
-		if (vblocks != se->valid_blocks) {
-			f2fs_msg(sbi->sb, KERN_INFO, "correcting valid block "
-				"counts %d -> %ld", se->valid_blocks, vblocks);
-			/* make accounting corrections */
-			del = vblocks - se->valid_blocks;
-		}
-	}
-	se->valid_blocks += del;
-
 	if (!f2fs_test_bit(offset, se->ckpt_valid_map))
 		se->ckpt_valid_blocks += del;
 
