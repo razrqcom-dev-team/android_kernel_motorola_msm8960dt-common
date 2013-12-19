@@ -1,0 +1,77 @@
+* Qualcomm MSM UART
+
+Required properties:
+- compatible :
+	- "qcom,msm-uart", and one of "qcom,msm-hsuart" or
+	  "qcom,msm-lsuart".
+- reg : offset and length of the register set for the device
+	for the hsuart operating in compatible mode, there should be a
+	second pair describing the gsbi registers.
+- interrupts : should contain the uart interrupt.
+
+There are two different UART blocks used in MSM devices,
+"qcom,msm-hsuart" and "qcom,msm-lsuart".  The msm-serial driver is
+able to handle both of these, and matches against the "qcom,msm-uart"
+as the compatibility.
+
+The registers for the "qcom,msm-hsuart" device need to specify both
+register blocks, even for the common driver.
+
+Example:
+
+	uart@19c400000 {
+		compatible = "qcom,msm-hsuart", "qcom,msm-uart";
+		reg = <0x19c40000 0x1000>,
+		      <0x19c00000 0x1000>;
+		interrupts = <195>;
+	};
+
+* Qualcomm MSM HSUART
+
+Required properties:
+- compatible : one of:
+	- "qcom,msm-lsuart-v14"
+- reg : offset and length of the register set for the device.
+- interrupts : should contain the uart interrupt.
+
+Example:
+
+	serial@19c400000 {
+		compatible = "qcom,msm-lsuart-v14"
+		reg = <0x19c40000 0x1000">;
+		interrupts = <195>;
+	};
+
+* Qualcomm MSM HS UART
+
+Required properties:
+- compatible : "qcom,msm-hsuart"
+- reg : offset and length of the register set for the device
+        for the hsuart operating in compatible mode, there should be a
+        second pair describing the gsbi registers.
+- reg-names : resources names, should be "uartdm_resource" and "gsbi_resource"
+        to match up with the previous reg offset/lengths.
+- interrupts : should contain the uart interrupt.
+
+- cell-index : this is the device's ID and translate to /dev/ttyHS<n>
+- qcom,msm-hs-dm-tx-crci : the crci TX for the hsuart data mover
+- qcom,msm-hs-dm-rx-crci : the crci RX for the hsuart data mover
+- qcom,msm-hs-dm-tx-chan : the data mover tx channel
+- qcom,msm-hs-dm-rx-chan : the data mover rx channel
+
+Example:
+
+	serial@16440000 {
+		compatible = "qcom,msm-hsuart";
+		status = "okay";
+		cell-index = <3>;
+
+		reg = <0x16440000 0x1000 0x16400000 0x4>;
+		reg-names = "uartdm_resouce", "gsbi_resource";
+		interrupts = <0 154 0>;
+
+		qcom,msm-hs-dm-tx-crci = <10>;
+		qcom,msm-hs-dm-rx-crci = <9>;
+		qcom,msm-hs-dm-tx-chan = <8>;
+		qcom,msm-hs-dm-rx-chan = <7>;
+	};
