@@ -104,6 +104,26 @@ static const struct vm_operations_struct f2fs_file_vm_ops = {
 	.page_mkwrite = f2fs_vm_page_mkwrite,
 };
 
+static int get_parent_ino(struct inode *inode, nid_t *pino)
+{
+	struct dentry *dentry;
+
+	inode = igrab(inode);
+	dentry = d_find_any_alias(inode);
+	iput(inode);
+	if (!dentry)
+		return 0;
+
+	if (update_dent_inode(inode, &dentry->d_name)) {
+		dput(dentry);
+		return 0;
+	}
+
+	*pino = parent_ino(dentry);
+	dput(dentry);
+	return 1;
+}
+
 int f2fs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 {
 	struct inode *inode = file->f_mapping->host;
@@ -131,21 +151,37 @@ int f2fs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 
 	mutex_lock(&inode->i_mutex);
 
-	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))
-		goto out;
-
+	/*
+	 * Both of fdatasync() and fsync() are able to be recovered from
+	 * sudden-power-off.
+	 */
 	if (!S_ISREG(inode->i_mode) || inode->i_nlink != 1)
 		need_cp = true;
-	else if (is_cp_file(inode))
+	else if (file_wrong_pino(inode))
 		need_cp = true;
 	else if (!space_for_roll_forward(sbi))
 		need_cp = true;
 	else if (!is_checkpointed_node(sbi, F2FS_I(inode)->i_pino))
 		need_cp = true;
+	else if (F2FS_I(inode)->xattr_ver == cur_cp_version(F2FS_CKPT(sbi)))
+		need_cp = true;
 
 	if (need_cp) {
+		nid_t pino;
+
+		F2FS_I(inode)->xattr_ver = 0;
+
 		/* all the dirty node pages should be flushed for POR */
 		ret = f2fs_sync_fs(inode->i_sb, 1);
+		if (file_wrong_pino(inode) && inode->i_nlink == 1 &&
+					get_parent_ino(inode, &pino)) {
+			F2FS_I(inode)->i_pino = pino;
+			file_got_pino(inode);
+			mark_inode_dirty_sync(inode);
+			ret = f2fs_write_inode(inode, NULL);
+			if (ret)
+				goto out;
+		}
 	} else {
 		/* if there is no written node page, write its inode page */
 		while (!sync_node_pages(sbi, inode->i_ino, &wbc)) {
@@ -178,7 +214,7 @@ int truncate_data_blocks_range(struct dnode_of_data *dn, int count)
 	struct f2fs_node *raw_node;
 	__le32 *addr;
 
-	raw_node = page_address(dn->node_page);
+	raw_node = F2FS_NODE(dn->node_page);
 	addr = blkaddr_in_node(raw_node) + ofs;
 
 	for ( ; count > 0; count--, addr++, dn->ofs_in_node++) {
@@ -256,7 +292,7 @@ static int truncate_blocks(struct inode *inode, u64 from)
 	}
 
 	if (IS_INODE(dn.node_page))
-		count = ADDRS_PER_INODE;
+		count = ADDRS_PER_INODE(F2FS_I(inode));
 	else
 		count = ADDRS_PER_BLOCK;
 
@@ -282,13 +318,20 @@ free_next:
 
 void f2fs_truncate(struct inode *inode)
 {
+	int err;
+
 	if (!(S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode) ||
 				S_ISLNK(inode->i_mode)))
 		return;
 
 	trace_f2fs_truncate(inode);
 
-	if (!truncate_blocks(inode, i_size_read(inode))) {
+	err = truncate_blocks(inode, i_size_read(inode));
+	if (err) {
+		f2fs_msg(inode->i_sb, KERN_ERR, "truncate failed with %d",
+				err);
+		f2fs_handle_error(F2FS_SB(inode->i_sb));
+	} else {
 		inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 		mark_inode_dirty(inode);
 	}

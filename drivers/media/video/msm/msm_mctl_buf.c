@@ -263,6 +263,7 @@ static void msm_vb2_ops_buf_cleanup(struct vb2_buffer *vb)
 		}
 		spin_unlock_irqrestore(&pcam_inst->vq_irqlock, flags);
 	}
+	buf = container_of(vb, struct msm_frame_buffer, vidbuf);
 	pmctl = msm_cam_server_get_mctl(pcam->mctl_handle);
 	if (pmctl == NULL || pmctl->client == NULL) {
 		pr_err("%s No mctl found\n", __func__);
@@ -377,6 +378,35 @@ void msm_mctl_gettimeofday(struct timeval *tv)
 	ktime_get_ts(&ts);
 	tv->tv_sec = ts.tv_sec;
 	tv->tv_usec = ts.tv_nsec/1000;
+}
+
+void msm_mctl_getAVTimer(struct msm_cam_v4l2_dev_inst *pcam_inst, struct timeval *tv)
+{
+   uint32_t avtimer_msw_1st = 0, avtimer_lsw = 0;
+   uint32_t avtimer_msw_2nd = 0;
+   uint8_t iter = 0;
+   tv->tv_sec = 0; tv->tv_usec = 0;
+
+   if (!(pcam_inst->p_avtimer_lsw) || !(pcam_inst->p_avtimer_msw)) {
+       pr_err("%s: ioremap failed\n", __func__);
+       return;
+   }
+
+   do {
+       avtimer_msw_1st = msm_camera_io_r(pcam_inst->p_avtimer_msw);
+       avtimer_lsw = msm_camera_io_r(pcam_inst->p_avtimer_lsw);
+       avtimer_msw_2nd = msm_camera_io_r(pcam_inst->p_avtimer_msw);
+   } while ((avtimer_msw_1st != avtimer_msw_2nd) && (iter++ < AVTIMER_ITERATION_CTR));
+
+   /*Just return if the MSW TimeStamps don't converge after a few iterations
+      Application needs to handle the zero TS values*/
+   if(iter >= AVTIMER_ITERATION_CTR){
+       pr_err("%s: AVTimer MSW TS did not converge !!!\n", __func__);
+       return;
+   }
+
+   tv->tv_sec = avtimer_msw_1st;
+   tv->tv_usec = avtimer_lsw;
 }
 
 struct msm_frame_buffer *msm_mctl_buf_find(
@@ -641,13 +671,25 @@ struct msm_cam_v4l2_dev_inst *msm_mctl_get_pcam_inst(
 	 *    video instance.
 	 */
 	if (buf_handle->buf_lookup_type == BUF_LOOKUP_BY_INST_HANDLE) {
-		idx = GET_MCTLPP_INST_IDX(buf_handle->inst_handle);
-		if (idx > MSM_DEV_INST_MAX) {
-			idx = GET_VIDEO_INST_IDX(buf_handle->inst_handle);
-			BUG_ON(idx > MSM_DEV_INST_MAX);
-			pcam_inst = pcam->dev_inst[idx];
+		if (buf_handle->inst_handle == 0) {
+			pr_err("%sBuffer instance handle not initialised",
+				 __func__);
+			return pcam_inst;
 		} else {
-			pcam_inst = pcam->mctl_node.dev_inst[idx];
+			idx = GET_MCTLPP_INST_IDX(buf_handle->inst_handle);
+			if (idx > MSM_DEV_INST_MAX) {
+				idx = GET_VIDEO_INST_IDX(
+					buf_handle->inst_handle);
+				if (idx > MSM_DEV_INST_MAX) {
+					pr_err("%s Invalid video inst idx %d",
+						__func__, idx);
+					return pcam_inst;
+				} else {
+					pcam_inst = pcam->dev_inst[idx];
+				}
+			} else {
+				pcam_inst = pcam->mctl_node.dev_inst[idx];
+			}
 		}
 	} else if ((buf_handle->buf_lookup_type == BUF_LOOKUP_BY_IMG_MODE)
 		&& (buf_handle->image_mode >= 0 &&

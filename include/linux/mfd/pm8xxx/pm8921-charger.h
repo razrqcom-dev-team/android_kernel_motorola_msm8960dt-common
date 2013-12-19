@@ -75,6 +75,7 @@ struct pm8921_charger_battery_data {
 	int				hot_temp_offset;
 	int				hot_temp_pcb;
 	signed char			hot_temp_pcb_offset;
+	unsigned int                    float_charge_timer;
 };
 #endif
 
@@ -271,6 +272,7 @@ struct pm8921_charger_platform_data {
 	unsigned int			warm_bat_chg_current;
 	unsigned int			cool_bat_voltage;
 	unsigned int			warm_bat_voltage;
+	int				hysteresis_temp;
 	unsigned int			(*get_batt_capacity_percent) (void);
 	int64_t				batt_id_min;
 	int64_t				batt_id_max;

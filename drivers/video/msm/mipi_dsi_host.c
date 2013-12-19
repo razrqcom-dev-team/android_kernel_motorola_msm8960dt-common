@@ -56,6 +56,7 @@ static struct mutex clk_mutex;
 
 static struct list_head pre_kickoff_list;
 static struct list_head post_kickoff_list;
+struct work_struct mdp_reset_work;
 
 enum {
 	STAT_DSI_START,
@@ -92,6 +93,11 @@ void mipi_dsi_mdp_stat_inc(int which)
 }
 #endif
 
+static void mdp_reset_wq_handler(struct work_struct *work)
+{
+	mdp4_mixer_reset(0);
+}
+
 void mipi_dsi_init(void)
 {
 	init_completion(&dsi_dma_comp);
@@ -104,6 +110,7 @@ void mipi_dsi_init(void)
 	spin_lock_init(&dsi_clk_lock);
 	mutex_init(&cmd_mutex);
 	mutex_init(&clk_mutex);
+	INIT_WORK(&mdp_reset_work, mdp_reset_wq_handler);
 
 	INIT_LIST_HEAD(&pre_kickoff_list);
 	INIT_LIST_HEAD(&post_kickoff_list);
@@ -182,7 +189,7 @@ void mipi_dsi_clk_cfg(int on)
 	mutex_lock(&clk_mutex);
 	if (on) {
 		if (dsi_clk_cnt == 0) {
-			mipi_dsi_prepare_clocks();
+			mipi_dsi_prepare_ahb_clocks();
 			mipi_dsi_ahb_ctrl(1);
 			mipi_dsi_clk_enable();
 		}
@@ -192,8 +199,9 @@ void mipi_dsi_clk_cfg(int on)
 			mipi_dsi_clk_cnt(-1);
 			if (dsi_clk_cnt == 0) {
 				mipi_dsi_clk_disable();
-				mipi_dsi_ahb_ctrl(0);
 				mipi_dsi_unprepare_clocks();
+				mipi_dsi_ahb_ctrl(0);
+				mipi_dsi_unprepare_ahb_clocks();
 			}
 		}
 	}
@@ -204,6 +212,7 @@ void mipi_dsi_clk_cfg(int on)
 
 void mipi_dsi_turn_on_clks(void)
 {
+	mipi_dsi_prepare_ahb_clocks();
 	mipi_dsi_ahb_ctrl(1);
 	mipi_dsi_clk_enable();
 }
@@ -211,7 +220,9 @@ void mipi_dsi_turn_on_clks(void)
 void mipi_dsi_turn_off_clks(void)
 {
 	mipi_dsi_clk_disable();
+	mipi_dsi_unprepare_clocks();
 	mipi_dsi_ahb_ctrl(0);
+	mipi_dsi_unprepare_ahb_clocks();
 }
 
 static void mipi_dsi_action(struct list_head *act_list)
@@ -1672,7 +1683,6 @@ err:
 int mipi_dsi_cmd_dma_tx(struct dsi_buf *tp)
 {
 	unsigned long flags;
-	int dsi_status1 = 0, dsi_status2 = 0;
 	int ret;
 
 #ifdef DSI_HOST_DEBUG
@@ -1704,6 +1714,7 @@ int mipi_dsi_cmd_dma_tx(struct dsi_buf *tp)
 		ret = -1;
 		goto end;
 	}
+	ret = tp->len;
 
 	INIT_COMPLETION(dsi_dma_comp);
 
@@ -1714,18 +1725,9 @@ int mipi_dsi_cmd_dma_tx(struct dsi_buf *tp)
 	wmb();
 	spin_unlock_irqrestore(&dsi_mdp_lock, flags);
 
-	dsi_status1 = MIPI_INP(MIPI_DSI_BASE + 0x04);
-	if (wait_for_completion_timeout(&dsi_dma_comp, WAIT_TOUT) == 0) {
-		dsi_status2 = MIPI_INP(MIPI_DSI_BASE + 0x04);
-		pr_err("%s: failed when transmit cmd =0x%1x. " \
-				" dsi_status1=0x%x dsi_status2=0x%x\n",
-				__func__, (unsigned)*(tp->data),
-				dsi_status1, dsi_status2);
-		ret = -1;
-	} else {
-		ret = tp->len;
-		pr_debug("%s: transmit cmd=0x%1x\n",
-					__func__, (unsigned)*(tp->data));
+	if (!wait_for_completion_timeout(&dsi_dma_comp,
+					msecs_to_jiffies(200))) {
+		pr_err("%s: dma timeout error\n", __func__);
 	}
 
 	dma_unmap_single(&dsi_dev, tp->dmap, tp->len, DMA_TO_DEVICE);
@@ -1775,6 +1777,7 @@ void mipi_dsi_cmd_mdp_busy(void)
 	unsigned long flags;
 	int need_wait = 0;
 	static int timeout_occurred;
+	long ret = 0;
 
 	pr_debug("%s: start pid=%d\n",
 				__func__, current->pid);
@@ -1784,19 +1787,25 @@ void mipi_dsi_cmd_mdp_busy(void)
 	spin_unlock_irqrestore(&dsi_mdp_lock, flags);
 
 	if (need_wait) {
-		if (wait_for_completion_timeout(&dsi_mdp_comp,
-			WAIT_TOUT) == 0) {
+		/* wait until DMA finishes the current job */
+		pr_debug("%s: pending pid=%d\n",
+				__func__, current->pid);
+		ret = wait_for_completion_timeout(&dsi_mdp_comp,
+			WAIT_TOUT);
+		if (ret == 0) {
 			pr_err("%s: timeout waiting for DSI MDP completion\n",
 				__func__);
 			timeout_occurred = 1;
-			mdp4_hang_dump(__func__);
-		} else {
+			mdp4_timeout_dump(__func__);
+		} else if (ret > 0) {
 			if (timeout_occurred)
 				pr_info("%s: recovered from previous timeout\n",
 					__func__);
 			timeout_occurred = 0;
 		}
 	}
+	pr_debug("%s: done pid=%d\n",
+				__func__, current->pid);
 }
 
 /*
@@ -2051,7 +2060,7 @@ void mipi_dsi_fifo_status(void)
 		MIPI_OUTP(MIPI_DSI_BASE + 0x0008, status);
 		pr_err("%s: Error: status=%x\n", __func__, status);
 		mipi_dsi_sw_reset();
-		mdp4_mixer_reset(0);
+		schedule_work(&mdp_reset_work);
 	}
 }
 
@@ -2260,7 +2269,7 @@ static void dsi_reg_range_dump(int offset, int range)
 	addr_start = (uint32)MIPI_DSI_BASE + offset;
 	for (i = 0; i < range ;) {
 		addr = addr_start + i;
-		MDP4_HANG_DUMP("0x%8x:%08x %08x %08x %08x %08x %08x %08x %08x\n",
+		MDP4_TIMEOUT_DUMP("0x%8x:%08x %08x %08x %08x %08x %08x %08x %08x\n",
 			 (uint32)(addr),
 			 (uint32)inpdw(addr), (uint32)inpdw(addr + 4),
 			 (uint32)inpdw(addr + 8), (uint32)inpdw(addr + 12),
@@ -2273,13 +2282,13 @@ static void dsi_reg_range_dump(int offset, int range)
 void mipi_dsi_regs_dump(void)
 {
 	mipi_dsi_clk_cfg(1);
-	MDP4_HANG_DUMP("------- DSI Regs dump starts ------\n");
+	MDP4_TIMEOUT_DUMP("------- DSI Regs dump starts ------\n");
 	dsi_reg_range_dump(0, 0xcc);
 	dsi_reg_range_dump(0x108, 0x20);
 	dsi_reg_range_dump(0x190, 0xc8);
 	dsi_reg_range_dump(0x280, 0x10);
 	dsi_reg_range_dump(0x440, 0xb0);
 	dsi_reg_range_dump(0x500, 0x5c);
-	MDP4_HANG_DUMP("------- DSI Regs dump done ------\n");
+	MDP4_TIMEOUT_DUMP("------- DSI Regs dump done ------\n");
 	mipi_dsi_clk_cfg(0);
 }

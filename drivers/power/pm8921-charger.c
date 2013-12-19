@@ -227,6 +227,8 @@ enum chrg_ocv_states {
  * @alarm_high_mv:		the battery alarm voltage high
  * @cool_temp_dc:		the cool temp threshold in deciCelcius
  * @warm_temp_dc:		the warm temp threshold in deciCelcius
+ * @hysteresis_temp_dc:		the hysteresis between temp thresholds in
+ *				deciCelcius
  * @resume_voltage_delta:	the voltage delta from vdd max at which the
  *				battery should resume charging
  * @term_current:		The charging based term current
@@ -249,6 +251,7 @@ struct pm8921_chg_chip {
 	unsigned int			alarm_high_mv;
 	int				cool_temp_dc;
 	int				warm_temp_dc;
+	int				hysteresis_temp_dc;
 	unsigned int			temp_check_period;
 	unsigned int			cool_bat_chg_current;
 	unsigned int			warm_bat_chg_current;
@@ -342,6 +345,8 @@ struct pm8921_chg_chip {
 	int				chrg_ocv_cc_af_uah;
 	int				chrg_ocv_cc_ef_uah;
 	int				chrg_ocv_bv_mv;
+	unsigned int			float_charge_timer;
+	unsigned long			float_charge_start_time;
 #endif
 };
 
@@ -370,6 +375,7 @@ static int calculate_suspend_time(struct pm8921_chg_chip *chip, int fcc,
 				  int soc, int temperature);
 #endif
 static struct pm8921_chg_chip *the_chip;
+static void check_temp_thresholds(struct pm8921_chg_chip *chip);
 
 #define LPM_ENABLE_BIT	BIT(2)
 static int pm8921_chg_set_lpm(struct pm8921_chg_chip *chip, int enable)
@@ -1489,6 +1495,12 @@ static int is_battery_valid(struct pm8921_chg_chip *chip)
 				batt_data.step_charge_vinmin;
 			pr_debug("step_charge_vinmin = %d\n",
 				chip->step_charge_vinmin);
+#ifdef CONFIG_PM8921_FLOAT_CHARGE
+			chip->float_charge_timer =
+				batt_data.float_charge_timer;
+			pr_debug("float_charge_timer = %d\n",
+				 chip->float_charge_timer);
+#endif
 			pm8921_chg_hw_config(chip);
 		}
 		chip->batt_valid = batt_vld;
@@ -2819,6 +2831,10 @@ static void handle_chg_insertion_removal(struct pm8921_chg_chip *chip)
 			chip->chrg_ocv_state = CHRG_OCV_NO_CHRG;
 			if (pdata->force_therm_bias)
 				pdata->force_therm_bias(chip->dev, 0);
+#ifdef CONFIG_PM8921_FLOAT_CHARGE
+			chip->float_charge_start_time = 0;
+			pm8921_bms_control_ocv_updates(START_OCV);
+#endif
 			wake_unlock(&chip->chg_wake_lock);
 		}
 		prev_plugged = plugged;
@@ -3771,12 +3787,13 @@ static void update_heartbeat(struct work_struct *work)
 				struct pm8921_chg_chip, update_heartbeat_work);
 	u8 temp;
 	int err;
+	bool chg_present = chip->usb_present || chip->dc_present;
 
 #ifdef CONFIG_PM8921_EXTENDED_INFO
 	struct pm8921_charger_platform_data *pdata =
 		chip->dev->platform_data;
 	struct pm8921_charger_battery_data data;
-	int64_t enable = 0;
+	int64_t enable = 1;
 	int64_t retval = 0;
 	int rc = 0;
 	int batt_mvolt;
@@ -3788,6 +3805,30 @@ static void update_heartbeat(struct work_struct *work)
 	int curr_time =
 		ktime_to_timespec(alarm_get_elapsed_realtime()).tv_sec;
 #endif
+
+#ifdef CONFIG_PM8921_FLOAT_CHARGE
+	int64_t float_enable = 1;
+	static int64_t temp_enable = 1;
+	struct timespec bootup_time;
+	unsigned long float_timestamp;
+	get_monotonic_boottime(&bootup_time);
+	float_timestamp = bootup_time.tv_sec;
+#endif
+
+	/* for battery health when charger is not connected */
+	if (chip->btc_override && !chg_present)
+		schedule_delayed_work(&chip->btc_override_work,
+			round_jiffies_relative(msecs_to_jiffies
+					(chip->btc_delay_ms)));
+
+	/*
+	 * check temp thresholds when charger is present and
+	 * and battery is FULL. The temperature here can impact
+	 * the charging restart conditions.
+	 */
+	if (chip->btc_override && chg_present &&
+				!wake_lock_active(&chip->eoc_wake_lock))
+		check_temp_thresholds(chip);
 
 	get_wl_psy();
 
@@ -3890,6 +3931,31 @@ static void update_heartbeat(struct work_struct *work)
 			alarm_state = PM_BATT_ALARM_NORMAL;
 	}
 
+#ifdef CONFIG_PM8921_FLOAT_CHARGE
+	if (!(is_usb_chg_plugged_in(chip) ||
+	      is_dc_chg_plugged_in(chip))) {
+		chip->float_charge_start_time = 0;
+		chip->bms_notify.is_battery_full = 0;
+	}
+
+	if ((get_prop_batt_status(chip) == POWER_SUPPLY_STATUS_FULL) &&
+	    (chip->float_charge_start_time)) {
+		if (((float_timestamp - chip->float_charge_start_time) >=
+		     chip->float_charge_timer)) {
+			float_enable = 0;
+			pm8921_bms_control_ocv_updates(STOP_OCV);
+		}
+
+		if ((percent_soc <= chip->resume_charge_percent)) {
+			float_enable = 1;
+			chip->float_charge_start_time = 0;
+			cancel_delayed_work(&chip->eoc_work);
+			schedule_delayed_work(&chip->eoc_work,
+					msecs_to_jiffies(EOC_CHECK_PERIOD_MS));
+		}
+	}
+#endif
+
 	if (pdata->temp_range_cb) {
 		data.max_voltage = chip->max_voltage_mv;
 		data.cool_temp = (chip->cool_temp_dc / 10);
@@ -3903,14 +3969,26 @@ static void update_heartbeat(struct work_struct *work)
 		retval = pdata->temp_range_cb(batt_temp, batt_mvolt,
 					      &data, &enable, &btm_state);
 		if (retval == 1) {
+#ifdef CONFIG_PM8921_FLOAT_CHARGE
+			if  (enable)
+				temp_enable = 1;
+			else
+				temp_enable = 0;
+#endif
 			pm_chg_vddmax_set(chip, data.max_voltage);
+#ifndef CONFIG_PM8921_FLOAT_CHARGE
 			pm_chg_auto_enable(chip, enable);
+#endif
 			pr_debug("Config VDDMAX = %d mV, Enable = %d\n",
 				 data.max_voltage,
 				(int)enable);
 			pr_info("Temperature State = %d\n", btm_state);
 		}
 	}
+
+#ifdef CONFIG_PM8921_FLOAT_CHARGE
+	pm_chg_auto_enable(chip, (temp_enable & float_enable));
+#endif
 
 	if ((chip->step_charge_voltage < chip->max_voltage_mv) &&
 	    (chip->step_charge_voltage > chip->min_voltage_mv)) {
@@ -4155,7 +4233,7 @@ static void check_temp_thresholds(struct pm8921_chg_chip *chip)
 
 	if (chip->warm_temp_dc != INT_MIN) {
 		if (chip->is_bat_warm
-			&& temp < chip->warm_temp_dc - TEMP_HYSTERISIS_DECIDEGC)
+			&& temp < chip->warm_temp_dc - chip->hysteresis_temp_dc)
 			battery_warm(false);
 		else if (!chip->is_bat_warm && temp >= chip->warm_temp_dc)
 			battery_warm(true);
@@ -4163,7 +4241,7 @@ static void check_temp_thresholds(struct pm8921_chg_chip *chip)
 
 	if (chip->cool_temp_dc != INT_MIN) {
 		if (chip->is_bat_cool
-			&& temp > chip->cool_temp_dc + TEMP_HYSTERISIS_DECIDEGC)
+			&& temp > chip->cool_temp_dc + chip->hysteresis_temp_dc)
 			battery_cool(false);
 		else if (!chip->is_bat_cool && temp <= chip->cool_temp_dc)
 			battery_cool(true);
@@ -4387,7 +4465,8 @@ static void btc_override_worker(struct work_struct *work)
 
 	temp = pm_chg_get_rt_status(chip, BATTTEMP_HOT_IRQ);
 	if (temp) {
-		if (decidegc < chip->btc_override_hot_decidegc)
+		if (decidegc < chip->btc_override_hot_decidegc -
+				chip->hysteresis_temp_dc)
 			/* stop forcing batt hot */
 			rc = pm_chg_override_hot(chip, 0);
 			if (rc)
@@ -4402,7 +4481,8 @@ static void btc_override_worker(struct work_struct *work)
 
 	temp = pm_chg_get_rt_status(chip, BATTTEMP_COLD_IRQ);
 	if (temp) {
-		if (decidegc > chip->btc_override_cold_decidegc)
+		if (decidegc > chip->btc_override_cold_decidegc +
+				chip->hysteresis_temp_dc)
 			/* stop forcing batt cold */
 			rc = pm_chg_override_cold(chip, 0);
 			if (rc)
@@ -4449,6 +4529,9 @@ static void eoc_worker(struct work_struct *work)
 	struct delayed_work *dwork = to_delayed_work(work);
 	struct pm8921_chg_chip *chip = container_of(dwork,
 				struct pm8921_chg_chip, eoc_work);
+#ifdef CONFIG_PM8921_FLOAT_CHARGE
+	struct timespec start_time;
+#endif
 	static int count;
 	int end;
 	int vbat_meas_uv, vbat_meas_mv;
@@ -4466,7 +4549,8 @@ static void eoc_worker(struct work_struct *work)
 
 	end = is_charging_finished(chip, vbat_batt_terminal_uv, ichg_meas_ma);
 
-	if (end == CHG_NOT_IN_PROGRESS) {
+	if (end == CHG_NOT_IN_PROGRESS && (!chip->btc_override ||
+		!(chip->usb_present || chip->dc_present))) {
 		count = 0;
 
 		goto eoc_worker_stop;
@@ -4499,13 +4583,16 @@ static void eoc_worker(struct work_struct *work)
 #endif
 #ifdef CONFIG_PM8921_FLOAT_CHARGE
 		pr_info("Taper Reached Float Charging\n");
+		get_monotonic_boottime(&start_time);
+		chip->float_charge_start_time = start_time.tv_sec;
 		chip->bms_notify.is_battery_full = 1;
 		pm8921_bms_get_cc_uah(&chip->chrg_ocv_cc_ef_uah);
 		bms_notify_check(chip);
 #endif
 	} else {
 		check_temp_thresholds(chip);
-		adjust_vdd_max_for_fastchg(chip, vbat_batt_terminal_uv);
+		if (end != CHG_NOT_IN_PROGRESS)
+			adjust_vdd_max_for_fastchg(chip, vbat_batt_terminal_uv);
 		pr_debug("EOC count = %d\n", count);
 		schedule_delayed_work(&chip->eoc_work,
 			      round_jiffies_relative(msecs_to_jiffies
@@ -4515,9 +4602,9 @@ static void eoc_worker(struct work_struct *work)
 	}
 
 eoc_worker_stop:
-	wake_unlock(&chip->eoc_wake_lock);
 	/* set the vbatdet back, in case it was changed to trigger charging */
 	set_appropriate_vbatdet(chip);
+	wake_unlock(&chip->eoc_wake_lock);
 }
 
 /**
@@ -4654,6 +4741,11 @@ static void __devinit determine_initial_state(struct pm8921_chg_chip *chip)
 		schedule_delayed_work(&chip->unplug_check_work,
 			msecs_to_jiffies(UNPLUG_CHECK_WAIT_PERIOD_MS));
 		pm8921_chg_enable_irq(chip, CHG_GONE_IRQ);
+
+		if (chip->btc_override)
+			schedule_delayed_work(&chip->btc_override_work,
+					round_jiffies_relative(msecs_to_jiffies
+						(chip->btc_delay_ms)));
 	}
 
 	pm8921_chg_enable_irq(chip, DCIN_VALID_IRQ);
@@ -6243,12 +6335,16 @@ static int pm8921_charger_resume(struct device *dev)
 					is_usb_chg_plugged_in(the_chip)))
 		schedule_delayed_work(&chip->btc_override_work, 0);
 
+	schedule_delayed_work(&chip->update_heartbeat_work, 0);
+
 	return 0;
 }
 
 static int pm8921_charger_suspend(struct device *dev)
 {
 	struct pm8921_chg_chip *chip = dev_get_drvdata(dev);
+
+	cancel_delayed_work_sync(&chip->update_heartbeat_work);
 
 	if (chip->btc_override)
 		cancel_delayed_work_sync(&chip->btc_override_work);
@@ -6308,6 +6404,11 @@ static int __devinit pm8921_charger_probe(struct platform_device *pdev)
 	else
 		chip->warm_temp_dc = INT_MIN;
 
+	if (pdata->hysteresis_temp)
+		chip->hysteresis_temp_dc = pdata->hysteresis_temp * 10;
+	else
+		chip->hysteresis_temp_dc = TEMP_HYSTERISIS_DECIDEGC;
+
 	chip->temp_check_period = pdata->temp_check_period;
 	chip->max_bat_chg_current = pdata->max_bat_chg_current;
 	/* Assign to corresponding module parameter */
@@ -6345,7 +6446,9 @@ static int __devinit pm8921_charger_probe(struct platform_device *pdev)
 	chip->chrg_ocv_cc_ef_uah = 0;
 	chip->chrg_ocv_bv_mv = 0;
 #endif
-
+#ifdef CONFIG_PM8921_FLOAT_CHARGE
+	chip->float_charge_start_time = 0;
+#endif
 	chip->cold_thr = pdata->cold_thr;
 	chip->hot_thr = pdata->hot_thr;
 	chip->rconn_mohm = pdata->rconn_mohm;

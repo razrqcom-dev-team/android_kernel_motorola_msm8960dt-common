@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2009-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -620,6 +620,12 @@ static void mddi_reg_write(int ndx, uint32 off, uint32 data)
 	else
 		base = (char *)msm_pmdh_base;
 
+	if (base == NULL) {
+		printk(KERN_INFO "%s: base offset is not set properly. \
+			Please check if MDDI enables correctly\n", __func__);
+		return;
+	}
+
 	mdp_pipe_ctrl(MDP_CMD_BLOCK, MDP_BLOCK_POWER_ON, FALSE);
 	writel(data, base + off);
 	mdp_pipe_ctrl(MDP_CMD_BLOCK, MDP_BLOCK_POWER_OFF, FALSE);
@@ -642,6 +648,12 @@ static int mddi_reg_read(int ndx)
 		base = msm_emdh_base;
 	else
 		base = msm_pmdh_base;
+
+	if (base == NULL) {
+		printk(KERN_INFO "%s: base offset is not set properly. \
+			Please check if MDDI enables correctly\n", __func__);
+		return -EFAULT;
+	}
 
 	reg = mddi_regs_list;
 	bp = debug_buf;
@@ -1327,6 +1339,7 @@ int mdp_debugfs_init(void)
 	}
 #endif
 
+#if defined(CONFIG_FB_MSM_MDDI) || defined(CONFIG_FB_MSM_EXTMDDI)
 	dent = debugfs_create_dir("mddi", NULL);
 
 	if (IS_ERR(dent)) {
@@ -1349,6 +1362,7 @@ int mdp_debugfs_init(void)
 			__FILE__, __LINE__);
 		return -1;
 	}
+#endif
 #endif
 
 	dent = debugfs_create_dir("emdh", NULL);
