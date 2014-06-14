@@ -393,8 +393,7 @@ static void show_data(unsigned long addr, int nbytes, const char *name)
 	}
 }
 
-
-static void __show_extra_register_data(struct pt_regs *regs, int nbytes)
+static void show_extra_register_data(struct pt_regs *regs, int nbytes)
 {
 	mm_segment_t fs;
 

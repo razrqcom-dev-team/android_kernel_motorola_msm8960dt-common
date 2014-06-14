@@ -434,7 +434,7 @@ static void *msm_ipc_router_skb_to_buf(struct sk_buff_head *skb_head,
 				       unsigned int len)
 {
 	struct sk_buff *temp;
-	int offset = 0, buf_len = 0, copy_len;
+	unsigned int offset = 0, buf_len = 0, copy_len;
 	void *buf;
 
 	if (!skb_head) {
@@ -2921,6 +2921,7 @@ int msm_ipc_router_close(void)
 				 &xprt_info_list, list) {
 		xprt_info->xprt->close(xprt_info->xprt);
 		list_del(&xprt_info->list);
+		wake_lock_destroy(&xprt_info->wakelock);
 		kfree(xprt_info);
 	}
 	up_write(&xprt_info_list_lock_lha5);
@@ -3177,6 +3178,7 @@ static int msm_ipc_router_add_xprt(struct msm_ipc_router_xprt *xprt)
 
 	xprt_info->workqueue = create_singlethread_workqueue(xprt->name);
 	if (!xprt_info->workqueue) {
+		wake_lock_destroy(&xprt_info->wakelock);
 		kfree(xprt_info);
 		return -ENOMEM;
 	}
