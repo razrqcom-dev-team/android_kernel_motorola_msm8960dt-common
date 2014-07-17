@@ -263,10 +263,10 @@ struct msp430_quickpeek_message {
 	u8 message;
 	u8 panel_state;
 	u8 buffer_id;
-	u16 x1;
-	u16 y1;
-	u16 x2;
-	u16 y2;
+	s16 x1;
+	s16 y1;
+	s16 x2;
+	s16 y2;
 	struct list_head list;
 };
 
@@ -1858,6 +1858,7 @@ static void msp430_irq_wake_work_func(struct work_struct *work)
 					"Reading peek draw data from msp failed\n");
 				msp430_quickpeek_status_ack(ps_msp430,
 					qp_message, AOD_QP_ACK_INVALID);
+				kfree(qp_message);
 				goto EXIT;
 			}
 			qp_message->buffer_id = read_cmdbuff[0] & 0x3f;
@@ -1883,6 +1884,7 @@ static void msp430_irq_wake_work_func(struct work_struct *work)
 					"Reading peek erase data from msp failed\n");
 				msp430_quickpeek_status_ack(ps_msp430,
 					qp_message, AOD_QP_ACK_INVALID);
+				kfree(qp_message);
 				goto EXIT;
 			}
 			qp_message->x1 = read_cmdbuff[1] | read_cmdbuff[2] << 8;
@@ -2990,6 +2992,8 @@ static long msp430_misc_ioctl(struct file *file, unsigned int cmd,
 			msp430_vote_aod_enabled(ps_msp430,
 				AOD_QP_ENABLED_VOTE_USER, false);
 		msp430_resolve_aod_enabled_locked(ps_msp430);
+		/* the user's vote can not fail */
+		err = 0;
 		break;
 	/* No default here since previous switch could have
 	   handled the command and cannot over write that */

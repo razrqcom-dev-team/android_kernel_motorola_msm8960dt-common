@@ -2274,7 +2274,6 @@ static int ctrl_cmd_tag(const char *input)
 	tag_t acct_tag = make_atag_from_value(0);
 	tag_t full_tag;
 	struct socket *el_socket;
-	struct sock *el_sk;
 	int res, argc;
 	struct sock_tag *sock_tag_entry;
 	struct tag_ref *tag_ref_entry;
@@ -2298,10 +2297,6 @@ static int ctrl_cmd_tag(const char *input)
 			current_fsuid());
 		goto err;
 	}
-
-	el_sk = el_socket->sk;
-	lock_sock(el_sk);
-
 	CT_DEBUG("qtaguid: ctrl_tag(%s): socket->...->f_count=%ld ->sk=%p\n",
 		 input, atomic_long_read(&el_socket->file->f_count),
 		 el_socket->sk);
@@ -2347,6 +2342,21 @@ static int ctrl_cmd_tag(const char *input)
 			 "st@%p ...->f_count=%ld\n",
 			 input, el_socket->sk, sock_tag_entry,
 			 atomic_long_read(&el_socket->file->f_count));
+
+		/*
+		 * The tagged socket should be the same as the one from this
+		 * sockfd_lookup(). Otherwise, some unexpected error happens,
+		 * we just put back this ref and return.
+		 */
+		if (sock_tag_entry->socket != el_socket) {
+			pr_err("qtaguid: ctrl_tag(%s): "
+			       "socket mismatch\n",
+			       input);
+			spin_unlock_bh(&sock_tag_list_lock);
+			res = -EINVAL;
+			goto err_tag_unref_put;
+		}
+
 		/*
 		 * This is a re-tagging, so release the sock_fd that was
 		 * locked at the time of the 1st tagging.
@@ -2406,8 +2416,6 @@ static int ctrl_cmd_tag(const char *input)
 	CT_DEBUG("qtaguid: ctrl_tag(%s): done st@%p ...->f_count=%ld\n",
 		 input, sock_tag_entry,
 		 atomic_long_read(&el_socket->file->f_count));
-
-	release_sock(el_sk);
 	return 0;
 
 err_tag_unref_put:
@@ -2418,7 +2426,6 @@ err_put:
 	CT_DEBUG("qtaguid: ctrl_tag(%s): done. ...->f_count=%ld\n",
 		 input, atomic_long_read(&el_socket->file->f_count) - 1);
 	/* Release the sock_fd that was grabbed by sockfd_lookup(). */
-	release_sock(el_sk);
 	sockfd_put(el_socket);
 	return res;
 
