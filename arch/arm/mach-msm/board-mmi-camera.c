@@ -196,6 +196,7 @@ struct msm_camera_sensor_info msm_camera_sensor_ov8820_data = {
 	.sensor_type = BAYER_SENSOR,
 	.actuator_info = &msm_act_main_cam_0_dw9714_info,
 };
+
 static struct msm_camera_sensor_flash_data flash_ov7736 = {
 	.flash_type = MSM_CAMERA_FLASH_NONE
 };
@@ -219,7 +220,6 @@ struct msm_camera_sensor_info msm_camera_sensor_ov7736_data = {
 	.camera_type          = FRONT_CAMERA_2D,
 	.sensor_type          = YUV_SENSOR,
 };
-
 
 static struct msm_camera_csi_lane_params ov10820_csi_lane_params = {
 	.csi_lane_assign = 0xE4,

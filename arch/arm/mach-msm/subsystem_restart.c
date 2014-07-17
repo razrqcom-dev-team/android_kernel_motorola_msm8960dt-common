@@ -73,6 +73,7 @@ struct subsys_device {
 	spinlock_t restart_lock;
 	bool restarting;
 	enum subsys_state state;
+	int subsys_restart_count;
 
 	void *notify;
 
@@ -92,6 +93,21 @@ static LIST_HEAD(subsystem_list);
 static DEFINE_MUTEX(subsystem_list_lock);
 static DEFINE_MUTEX(soc_order_reg_lock);
 static DEFINE_MUTEX(restart_log_mutex);
+
+static int subsys_restart_count_get(char *buffer, struct kernel_param *kp)
+{
+	struct subsys_device *dev;
+	int count = 0;
+	mutex_lock(&subsystem_list_lock);
+	list_for_each_entry(dev, &subsystem_list, list)
+		count += scnprintf(buffer+count, PAGE_SIZE-count, "%s %d\n",
+			dev->desc->name, dev->subsys_restart_count);
+	mutex_unlock(&subsystem_list_lock);
+	return count;
+}
+
+module_param_call(restart_count, NULL,
+	subsys_restart_count_get, NULL, S_IRUGO);
 
 /* SOC specific restart orders go here */
 
@@ -474,6 +490,7 @@ static void __subsystem_restart_dev(struct subsys_device *dev)
 	 * shutdown.
 	 */
 	spin_lock_irqsave(&dev->restart_lock, flags);
+	dev->subsys_restart_count++;
 	if (dev->state != SUBSYS_CRASHED) {
 		if (dev->state == SUBSYS_ONLINE && !dev->restarting) {
 			dev->restarting = true;

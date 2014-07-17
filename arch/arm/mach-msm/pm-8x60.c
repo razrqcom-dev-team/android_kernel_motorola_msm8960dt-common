@@ -793,7 +793,8 @@ int msm_pm_idle_prepare(struct cpuidle_device *dev,
 
 		switch (mode) {
 		case MSM_PM_SLEEP_MODE_POWER_COLLAPSE:
-			if (num_online_cpus() > 1 || cpu_maps_is_updating()) {
+			if (num_online_cpus() > 1 || cpu_maps_is_updating() ||
+			    atomic_read(&cpu_online_num) > 1) {
 				allow = false;
 				break;
 			}
@@ -1399,6 +1400,9 @@ static int __init msm_pm_init(void)
 		return rc;
 	}
 
+	atomic_set(&cpu_online_num, num_online_cpus());
+
+	register_hotcpu_notifier(&msm_pm_cpu_notifier);
 
 	atomic_set(&cpu_online_num, num_online_cpus());
 

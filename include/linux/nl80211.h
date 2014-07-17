@@ -610,6 +610,7 @@
  *
  *	@NL80211_CMD_INTERFACE_UNAVAILABLE: Notify the userspace about the
  *	unavailability of network interface.
+ *
  * @NL80211_CMD_CRIT_PROTOCOL_START: Indicates user-space will start running
  *	a critical protocol that needs more reliability in the connection to
  *	complete.

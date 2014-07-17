@@ -928,7 +928,8 @@ static void msmfb_early_resume(struct early_suspend *h)
 }
 #endif
 
-static int unset_bl_level, bl_updated;
+static int unset_bl_level = -1;
+static int bl_updated;
 static int bl_level_old;
 
 static int mdp_bl_scale_config(struct msm_fb_data_type *mfd,
@@ -1041,8 +1042,7 @@ static int msm_fb_blank_sub(int blank_mode, struct fb_info *info,
 			curr_pwr_state = mfd->panel_power_on;
 			down(&mfd->sem);
 			mfd->panel_power_on = FALSE;
-			if (mfd->fbi->node == 0)
-				bl_updated = 0;
+			bl_updated = 0;
 			up(&mfd->sem);
 			cancel_delayed_work_sync(&mfd->backlight_worker);
 
@@ -1177,11 +1177,11 @@ static int msm_fb_blank(int blank_mode, struct fb_info *info)
 		if (blank_mode == FB_BLANK_UNBLANK) {
 			mfd->suspend.panel_power_on = TRUE;
 			/* if unblank is called when system is in suspend,
-			wait for the system to resume */
-			while (mfd->suspend.op_suspend) {
-				pr_debug("waiting for system to resume\n");
-				msleep(20);
-			}
+			do not unblank but send SUCCESS to hwc, so that hwc
+			keeps pushing frames and display comes up as soon
+			as system is resumed */
+			unlock_panel_mutex(mfd);
+			return 0;
 		}
 		else
 			mfd->suspend.panel_power_on = FALSE;
@@ -1334,6 +1334,10 @@ static int msm_fb_register(struct msm_fb_data_type *mfd)
 		var->height = panel_info->physical_height_mm;
 	if (panel_info->physical_width_mm)
 		var->width = panel_info->physical_width_mm;
+
+	/* Set undefined column alignments to single pixel alignment */
+	if (panel_info->col_align == 0)
+		panel_info->col_align = 1;
 
 	switch (mfd->fb_imgType) {
 	case MDP_RGB_565:
@@ -1885,7 +1889,7 @@ static void msm_fb_free_base_pipe(struct msm_fb_data_type *mfd)
 static int msm_fb_release_all(struct fb_info *info, boolean is_all)
 {
 	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)info->par;
-	int ret = 0, bl_level = 0;
+	int ret = 0;
 
 	if (!mfd->ref_cnt) {
 		MSM_FB_INFO("msm_fb_release: try to close unopened fb %d!\n",
@@ -1901,13 +1905,6 @@ static int msm_fb_release_all(struct fb_info *info, boolean is_all)
 
 	if (!mfd->ref_cnt) {
 		if (mfd->op_enable) {
-			if (info->node == 0) {
-				down(&mfd->sem);
-				bl_level = mfd->bl_level;
-				msm_fb_set_backlight(mfd, 0);
-				unset_bl_level = bl_level;
-				up(&mfd->sem);
-			}
 			ret = msm_fb_blank_sub(FB_BLANK_POWERDOWN, info,
 							mfd->op_enable);
 			if (ret != 0) {
@@ -2201,7 +2198,7 @@ static int msm_fb_pan_display_sub(struct fb_var_screeninfo *var,
 
 	up(&msm_fb_pan_sem);
 
-	if (!bl_updated)
+	if (unset_bl_level != -1 && !bl_updated)
 		schedule_delayed_work(&mfd->backlight_worker,
 					backlight_duration);
 
@@ -2234,7 +2231,7 @@ static void msm_fb_commit_wq_handler(struct work_struct *work)
 	complete_all(&mfd->commit_comp);
 	mutex_unlock(&mfd->sync_mutex);
 
-	if (!bl_updated)
+	if (unset_bl_level != -1 && !bl_updated)
 		schedule_delayed_work(&mfd->backlight_worker,
 					backlight_duration);
 }

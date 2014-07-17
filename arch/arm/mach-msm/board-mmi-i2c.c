@@ -35,7 +35,6 @@
 #include <linux/i2c/lm3532.h>
 #endif
 
-
 #define SY32xx_TOUCH_SCL_GPIO       37
 #define SY32xx_TOUCH_SDA_GPIO       36
 
@@ -735,7 +734,6 @@ out:
 	return rv;
 }
 
-
 static struct oem_camera_sensor_data s5k5b3g_oem_data;
 
 static int __init s5k5b3g_init_i2c_device(struct i2c_board_info *info,
@@ -1094,6 +1092,7 @@ static int __init lm3532_init_i2c_device(struct i2c_board_info *info,
 	info->platform_data = &mp_lm3532_pdata;
 	return 0;
 }
+
 static int __init lm3556_init_i2c_device(struct i2c_board_info *info,
 		struct device_node *node)
 {
@@ -1487,6 +1486,7 @@ __init void mmi_register_i2c_devices_from_dt(void)
 			if (!of_property_read_string(dev_node,
 							"i2c,type", &name))
 				strlcpy(info.type, name, I2C_NAME_SIZE);
+
 			if (!of_property_read_u32(dev_node,
 							"i2c,address", &value))
 				info.addr = value;
@@ -1494,6 +1494,7 @@ __init void mmi_register_i2c_devices_from_dt(void)
 			if (!of_property_read_u32(dev_node,
 							"irq,gpio", &value))
 				info.irq = gpio_to_irq(value);
+
 			if (!of_property_read_u32(dev_node,
 							"type", &value)) {
 				I2C_INIT_FUNC init_func =

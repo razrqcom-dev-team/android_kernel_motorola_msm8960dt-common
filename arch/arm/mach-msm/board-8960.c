@@ -3490,10 +3490,6 @@ void __init msm8960_cdp_init(void)
 
 	if (msm8960_oem_funcs.msm_device_init)
 		msm8960_oem_funcs.msm_device_init(&msm8960_oem_funcs);
-	if (machine_is_msm8960_mtp() || machine_is_msm8960_fluid() ||
-		machine_is_msm8960_cdp()) {
-		platform_device_register(&msm_dev_avtimer_device);
-	}
 }
 
 MACHINE_START(MSM8960_CDP, "QCT MSM8960 CDP")

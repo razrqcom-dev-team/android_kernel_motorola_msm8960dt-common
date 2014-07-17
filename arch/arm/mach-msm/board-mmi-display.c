@@ -1286,7 +1286,6 @@ static int __init no_disp_detection(void)
 	return no_disp;
 }
 
-
 /*
  * This voltage used to enable in mipi_dsi_panel_power() but since SOL
  * smooth transition between boot loader and kernel, this API will be called

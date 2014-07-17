@@ -29,7 +29,6 @@ struct msm_hotplug_device {
 	unsigned int warm_boot;
 };
 
-
 static cpumask_t cpu_dying_mask;
 
 static DEFINE_PER_CPU_SHARED_ALIGNED(struct msm_hotplug_device,

@@ -2579,6 +2579,9 @@ adreno_dump_and_exec_ft(struct kgsl_device *device)
 		 * we will get errors
 		 */
 		if (!adreno_dev->long_ib) {
+			char *path;
+			char sys_path[256];
+
 			/*
 			 * Trigger an automatic dump of the state to
 			 * the console
@@ -2592,8 +2595,14 @@ adreno_dump_and_exec_ft(struct kgsl_device *device)
 			*/
 			kgsl_device_snapshot(device, 1);
 
-			dropbox_queue_event_binary("gpu_snapshot",
-				device->snapshot, device->snapshot_size);
+			path = kobject_get_path(&device->snapshot_kobj,
+				GFP_KERNEL);
+			snprintf(sys_path, sizeof(sys_path), "/sys%s/dump",
+				path);
+			kfree(path);
+
+			dropbox_queue_event_binaryfile("gpu_snapshot",
+				sys_path);
 		}
 
 		result = adreno_ft(device, &ft_data);
@@ -3530,6 +3539,8 @@ unsigned int adreno_ft_detect(struct kgsl_device *device,
 		}
 
 		if (fast_hang_detected) {
+				if (device->state != KGSL_STATE_DUMP_AND_FT)
+					kgsl_ft_report_pos = 0;
 			KGSL_FT_ERR(device,
 				"Proc %s, ctxt_id %d ts %d triggered fault tolerance"
 				" on global ts %d\n",
